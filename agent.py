@@ -1,71 +1,183 @@
-import os
-from typing import Any
+from typing import Literal, TypedDict
 
-import requests
 from dotenv import load_dotenv
-from langchain.agents import create_agent
-from langchain.tools import tool
 from langchain_openai import ChatOpenAI
+from langgraph.graph import END, START, StateGraph
 
 from weather import get_weather
 
 
 load_dotenv()
+from langgraph.graph import END, START, StateGraph
+
+from weather import get_weather
 
 
-@tool
-def weather_tool(city: str) -> str:
+class AgentState(TypedDict):
+    user_input: str
+    action: str
+    response: str
+
+
+model = ChatOpenAI(
+    model="gpt-4.1-mini",
+    temperature=0,
+)
+
+
+def input_node(state: AgentState) -> AgentState:
     """
-    Get the current weather for a city.
-
-    Args:
-        city: The city name, such as Durham, Beijing, or London.
+    Get input from the user.
     """
+
+    user_input = input("\nYou: ").strip()
+
+    return {
+        **state,
+        "user_input": user_input,
+    }
+
+
+def decision_node(state: AgentState) -> AgentState:
+    """
+    Let the LLM decide what action the user wants.
+    """
+
+    prompt = f"""
+You are an intent classifier.
+
+Classify the user's input into exactly one of these categories:
+
+weather
+exit
+other
+
+Rules:
+
+weather:
+The user wants to know current weather information
+for a city.
+
+exit:
+The user wants to stop, quit, leave, or end the program.
+
+other:
+Anything else.
+
+User input:
+{state["user_input"]}
+
+Return only one word:
+weather
+exit
+other
+"""
+
+    response = model.invoke(prompt)
+
+    action = response.content.strip().lower()
+
+    return {
+        **state,
+        "action": action,
+    }
+
+
+def weather_node(state: AgentState) -> AgentState:
+    """
+    Ask the LLM to extract the city and call the weather function.
+    """
+
+    prompt = f"""
+Extract only the city name from this user request.
+
+User request:
+{state["user_input"]}
+
+Return only the city name.
+"""
+
+    response = model.invoke(prompt)
+
+    city = response.content.strip()
 
     try:
-        return get_weather(city)
+        weather = get_weather(city)
 
-    except ValueError as error:
-        return f"Could not get weather: {error}"
+        print(f"\nAgent:\n{weather}")
 
-    except requests.Timeout:
-        return "The weather request timed out."
+        return {
+            **state,
+            "response": weather,
+        }
 
-    except requests.RequestException as error:
-        return f"Network error: {error}"
+    except Exception as error:
+        message = f"Could not get weather: {error}"
 
-    except KeyError as error:
-        return f"Unexpected weather data: missing {error}"
+        print(f"\nAgent: {message}")
+
+        return {
+            **state,
+            "response": message,
+        }
 
 
-def create_weather_agent() -> Any:
+def other_node(state: AgentState) -> AgentState:
     """
-    Create and return the weather agent.
+    Ignore unsupported requests.
     """
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    print("\nAgent: Request ignored.")
 
-    if not api_key:
-        raise ValueError(
-            "OPENAI_API_KEY is missing. "
-            "Please add it to the .env file."
-        )
+    return {
+        **state,
+        "response": "Request ignored.",
+    }
 
-    model = ChatOpenAI(
-        model="gpt-4.1-mini",
-        temperature=0,
+
+def route_action(
+    state: AgentState,
+) -> Literal["weather", "exit", "other"]:
+    """
+    Route based on the LLM's decision.
+    """
+
+    action = state["action"]
+
+    if action == "weather":
+        return "weather"
+
+    if action == "exit":
+        return "exit"
+
+    return "other"
+
+
+def build_graph():
+    graph = StateGraph(AgentState)
+
+    graph.add_node("input", input_node)
+    graph.add_node("decision", decision_node)
+    graph.add_node("weather", weather_node)
+    graph.add_node("other", other_node)
+
+    graph.add_edge(START, "input")
+    graph.add_edge("input", "decision")
+
+    graph.add_conditional_edges(
+        "decision",
+        route_action,
+        {
+            "weather": "weather",
+            "exit": END,
+            "other": "other",
+        },
     )
 
-    agent = create_agent(
-        model=model,
-        tools=[weather_tool],
-        system_prompt=(
-            "You are a helpful weather assistant. "
-            "When the user asks about current weather, "
-            "temperature, humidity, or wind, use weather_tool. "
-            "Do not invent weather information. "
-            "Use the tool observation to answer."
-        ),
-    )
+    graph.add_edge("weather", "input")
+    graph.add_edge("other", "input")
 
-    return agent
+    return graph.compile()
+
+
+weather_agent = build_graph()

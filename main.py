@@ -1,53 +1,21 @@
-from agent import create_weather_agent
+from agent import weather_agent
 
 
 def main() -> None:
-    """
-    Run the weather agent in the terminal.
-    """
-
-    try:
-        agent = create_weather_agent()
-
-    except ValueError as error:
-        print(f"Setup error: {error}")
-        return
-
     print("=" * 50)
     print("Weather Agent")
-    print("Ask about the current weather in any city.")
-    print("Type 'quit' or 'exit' to stop.")
+    print("Ask about weather or ask the agent to exit.")
     print("=" * 50)
 
-    while True:
-        user_input = input("\nYou: ").strip()
+    initial_state = {
+        "user_input": "",
+        "action": "",
+        "response": "",
+    }
 
-        if user_input.lower() in {"quit", "exit"}:
-            print("Agent: Goodbye!")
-            break
+    weather_agent.invoke(initial_state)
 
-        if not user_input:
-            print("Agent: Please enter a question.")
-            continue
-
-        try:
-            result = agent.invoke(
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": user_input,
-                        }
-                    ]
-                }
-            )
-
-            final_message = result["messages"][-1]
-
-            print(f"\nAgent: {final_message.content}")
-
-        except Exception as error:
-            print(f"\nAgent error: {error}")
+    print("\nAgent: Goodbye!")
 
 
 if __name__ == "__main__":
