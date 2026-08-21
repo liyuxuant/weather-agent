@@ -1,17 +1,39 @@
 import json
+import os
 import re
 import subprocess
 import time
+from urllib.parse import quote
 
 
-SEARCH_URL = (
-    "https://www.linkedin.com/jobs/search-results/"
-    "?keywords=Java%20Engineer"
+PROFILE_PATH = os.path.expanduser(
+    "~/.agent-browser-linkedin"
 )
 
 
+def build_search_url(keyword):
+    """
+    Build a LinkedIn job search URL.
+    """
+    encoded_keyword = quote(keyword)
+
+    return (
+        "https://www.linkedin.com/jobs/search-results/"
+        f"?keywords={encoded_keyword}"
+    )
+
+
 def run_agent_browser(*args):
-    command = ["npx", "agent-browser", *args]
+    """
+    Run agent-browser using the persistent LinkedIn profile.
+    """
+    command = [
+        "npx",
+        "agent-browser",
+        "--profile",
+        PROFILE_PATH,
+        *args,
+    ]
 
     result = subprocess.run(
         command,
@@ -31,7 +53,12 @@ def run_agent_browser(*args):
     return result.stdout
 
 
-def get_snapshot_json(retries=5, delay=2):
+def get_snapshot_json(retries=8, delay=2):
+    """
+    Get accessibility snapshot as JSON.
+
+    Retry when agent-browser is temporarily busy.
+    """
     last_error = None
 
     for attempt in range(retries):
@@ -69,8 +96,13 @@ def get_snapshot_json(retries=5, delay=2):
 
 
 def extract_title_from_button_name(name):
+    """
+    Extract a cleaner job title from a LinkedIn job result.
+    """
     if " (Verified job)" in name:
-        return name.split(" (Verified job)")[0].strip()
+        return name.split(
+            " (Verified job)"
+        )[0].strip()
 
     match = re.search(
         r"Dismiss (.+?) job",
@@ -83,16 +115,20 @@ def extract_title_from_button_name(name):
     return name.strip()
 
 
-def find_first_five_titles(snapshot):
+def find_job_titles(snapshot, limit=5):
+    """
+    Find the first N job titles from search results.
+    """
     refs = snapshot["data"]["refs"]
 
     titles = []
 
     for _, info in refs.items():
-        if info.get("role") != "button":
-            continue
-
+        role = info.get("role", "")
         name = info.get("name", "")
+
+        if role != "button":
+            continue
 
         if not name:
             continue
@@ -106,18 +142,23 @@ def find_first_five_titles(snapshot):
         if " job" not in name:
             continue
 
-        title = extract_title_from_button_name(name)
+        title = extract_title_from_button_name(
+            name
+        )
 
         if title not in titles:
             titles.append(title)
 
-        if len(titles) == 5:
+        if len(titles) >= limit:
             break
 
     return titles
 
 
 def find_current_ref_for_title(snapshot, title):
+    """
+    Find the current accessibility ref for a job title.
+    """
     refs = snapshot["data"]["refs"]
 
     for ref, info in refs.items():
@@ -132,6 +173,9 @@ def find_current_ref_for_title(snapshot, title):
         if name.startswith("Dismiss "):
             continue
 
+        if " job" not in name:
+            continue
+
         current_title = extract_title_from_button_name(
             name
         )
@@ -143,6 +187,10 @@ def find_current_ref_for_title(snapshot, title):
 
 
 def extract_selected_job(snapshot, expected_title):
+    """
+    Extract selected job title and LinkedIn job URL
+    from the job detail panel.
+    """
     snapshot_text = snapshot["data"]["snapshot"]
 
     pattern = re.compile(
@@ -151,9 +199,14 @@ def extract_selected_job(snapshot, expected_title):
         r'url=(https://www\.linkedin\.com/jobs/view/\d+/[^]]*)\]'
     )
 
-    matches = pattern.findall(snapshot_text)
+    matches = pattern.findall(
+        snapshot_text
+    )
 
     for title, url in matches:
+        if title != expected_title:
+            continue
+
         clean_match = re.match(
             r"(https://www\.linkedin\.com/jobs/view/\d+/)",
             url,
@@ -162,13 +215,18 @@ def extract_selected_job(snapshot, expected_title):
         if clean_match:
             url = clean_match.group(1)
 
-        if title == expected_title:
-            return title, url
+        return {
+            "title": title,
+            "url": url,
+        }
 
     return None
 
 
 def click_job_safely(ref):
+    """
+    Scroll to and click a job result.
+    """
     try:
         run_agent_browser(
             "scrollintoview",
@@ -192,38 +250,175 @@ def click_job_safely(ref):
         return False
 
 
-def main():
-    print("=" * 60)
-    print("LinkedIn Java Engineer Job Search")
-    print("=" * 60)
+def check_login_status():
+    """
+    Check whether the LinkedIn profile is logged in.
+    """
+    try:
+        run_agent_browser(
+            "open",
+            "https://www.linkedin.com/jobs/",
+            "--headed",
+        )
 
-    print("\nOpening LinkedIn job search...")
+    except Exception:
+        print(
+            "Login check open timed out."
+        )
+        print(
+            "The page may still have opened."
+        )
 
-    run_agent_browser(
-        "open",
-        SEARCH_URL,
-        "--headed",
-    )
+    time.sleep(3)
 
-    run_agent_browser(
-        "wait",
-        "--load",
-        "domcontentloaded",
-    )
+    try:
+        run_agent_browser(
+            "wait",
+            "--load",
+            "domcontentloaded",
+        )
+
+    except Exception:
+        print(
+            "Login page load wait timed out."
+        )
 
     time.sleep(2)
 
-    print("Reading job results...")
+    snapshot = get_snapshot_json()
 
-    initial_snapshot = get_snapshot_json()
+    refs = snapshot["data"]["refs"]
 
-    titles = find_first_five_titles(
-        initial_snapshot
+    for _, info in refs.items():
+        name = info.get(
+            "name",
+            "",
+        ).lower()
+
+        if (
+            "sign in" in name
+            or "邮箱或手机" in name
+            or name == "登录"
+        ):
+            return False
+
+    return True
+
+
+def search_linkedin_jobs(
+    keyword,
+    limit=5,
+):
+    """
+    Search LinkedIn jobs using agent-browser.
+
+    Args:
+        keyword:
+            Example: "Java Engineer"
+
+        limit:
+            Maximum number of jobs to return.
+
+    Returns:
+        [
+            {
+                "title": "...",
+                "url": "..."
+            }
+        ]
+    """
+    print(
+        f"\nSearching LinkedIn for: {keyword}"
+    )
+
+    print(
+        f"Requested jobs: {limit}"
+    )
+
+    search_url = build_search_url(
+        keyword
+    )
+
+    # LinkedIn can load slowly.
+    # A timeout does not always mean navigation failed.
+    try:
+        run_agent_browser(
+            "open",
+            search_url,
+            "--headed",
+        )
+
+    except Exception:
+        print(
+            "Open command timed out."
+        )
+        print(
+            "The page may still have opened."
+        )
+
+    time.sleep(3)
+
+    try:
+        run_agent_browser(
+            "wait",
+            "--load",
+            "domcontentloaded",
+        )
+
+    except Exception:
+        print(
+            "Page load wait timed out."
+        )
+        print(
+            "Continuing..."
+        )
+
+    time.sleep(3)
+
+    print(
+        "Checking current page..."
+    )
+
+    try:
+        current_url = run_agent_browser(
+            "get",
+            "url",
+        ).strip()
+
+        print(
+            f"Current URL: {current_url}"
+        )
+
+    except Exception as error:
+        print(
+            f"Could not get current URL: {error}"
+        )
+
+    print(
+        "Reading job results..."
+    )
+
+    try:
+        initial_snapshot = (
+            get_snapshot_json()
+        )
+
+    except Exception as error:
+        print(
+            f"Could not read LinkedIn page: {error}"
+        )
+        return []
+
+    titles = find_job_titles(
+        initial_snapshot,
+        limit,
     )
 
     if not titles:
-        print("No job results found.")
-        return
+        print(
+            "No job results found."
+        )
+        return []
 
     print(
         f"Found {len(titles)} candidate jobs."
@@ -240,12 +435,17 @@ def main():
         )
 
         try:
-            # Fresh snapshot every time.
-            snapshot = get_snapshot_json()
+            # Fresh snapshot every time,
+            # because refs can change.
+            snapshot = (
+                get_snapshot_json()
+            )
 
-            ref = find_current_ref_for_title(
-                snapshot,
-                title,
+            ref = (
+                find_current_ref_for_title(
+                    snapshot,
+                    title,
+                )
             )
 
             if not ref:
@@ -254,15 +454,24 @@ def main():
                 )
                 continue
 
-            success = click_job_safely(ref)
+            success = click_job_safely(
+                ref
+            )
 
             if not success:
-                # Re-snapshot once and retry.
-                snapshot = get_snapshot_json()
+                print(
+                    "Refreshing snapshot and retrying..."
+                )
 
-                ref = find_current_ref_for_title(
-                    snapshot,
-                    title,
+                snapshot = (
+                    get_snapshot_json()
+                )
+
+                ref = (
+                    find_current_ref_for_title(
+                        snapshot,
+                        title,
+                    )
                 )
 
                 if not ref:
@@ -271,30 +480,40 @@ def main():
                     )
                     continue
 
-                run_agent_browser(
-                    "scrollintoview",
-                    f"@{ref}",
-                )
+                try:
+                    run_agent_browser(
+                        "scrollintoview",
+                        f"@{ref}",
+                    )
 
-                time.sleep(1)
+                    time.sleep(1)
 
-                run_agent_browser(
-                    "click",
-                    f"@{ref}",
-                )
+                    run_agent_browser(
+                        "click",
+                        f"@{ref}",
+                    )
 
-            # Give LinkedIn time to update right panel.
+                except Exception as error:
+                    print(
+                        f"Retry click failed: {error}"
+                    )
+                    continue
+
+            # Give right-side detail panel time to load.
             time.sleep(2)
 
             selected_job = None
 
-            # Retry detail extraction a few times.
-            for _ in range(4):
-                detail_snapshot = get_snapshot_json()
+            for _ in range(5):
+                detail_snapshot = (
+                    get_snapshot_json()
+                )
 
-                selected_job = extract_selected_job(
-                    detail_snapshot,
-                    title,
+                selected_job = (
+                    extract_selected_job(
+                        detail_snapshot,
+                        title,
+                    )
                 )
 
                 if selected_job:
@@ -308,29 +527,115 @@ def main():
                 )
                 continue
 
-            results.append(selected_job)
+            results.append(
+                selected_job
+            )
 
         except Exception as error:
             print(
-                f"Could not read job {index}: {error}"
+                f"Could not read {title}: {error}"
             )
 
-    print("\n" + "=" * 60)
-    print("Top Java Engineer Jobs")
-    print("=" * 60)
+    return results
 
-    if not results:
+
+def print_results(jobs):
+    """
+    Print extracted job results.
+    """
+    print(
+        "\n" + "=" * 60
+    )
+
+    print(
+        "LinkedIn Job Results"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    if not jobs:
         print(
-            "No job links could be extracted."
+            "No jobs could be extracted."
         )
         return
 
-    for index, (title, url) in enumerate(
-        results,
+    for index, job in enumerate(
+        jobs,
         start=1,
     ):
-        print(f"\n{index}. {title}")
-        print(f"   {url}")
+        print(
+            f"\n{index}. {job['title']}"
+        )
+
+        print(
+            f"   {job['url']}"
+        )
+
+
+def main():
+    """
+    Standalone test.
+
+    Later the AI Agent will call
+    search_linkedin_jobs() directly.
+    """
+    print(
+        "=" * 60
+    )
+
+    print(
+        "LinkedIn Job Search Tool"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    print(
+        "\nChecking LinkedIn login..."
+    )
+
+    try:
+        logged_in = check_login_status()
+
+    except Exception as error:
+        print(
+            f"Could not check login status:\n{error}"
+        )
+        return
+
+    if not logged_in:
+        print(
+            "\nLinkedIn is not logged in."
+        )
+
+        print(
+            "Run this command and log in manually:"
+        )
+
+        print(
+            "\nnpx agent-browser "
+            "--profile ~/.agent-browser-linkedin "
+            "open https://www.linkedin.com "
+            "--headed"
+        )
+
+        return
+
+    print(
+        "LinkedIn login detected."
+    )
+
+    jobs = search_linkedin_jobs(
+        keyword="Java Engineer",
+        limit=5,
+    )
+
+    print_results(
+        jobs
+    )
 
 
 if __name__ == "__main__":
